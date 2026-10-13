@@ -1,0 +1,40 @@
+[
+  {
+    "key": "ctrl+;",
+    "command": "runCommands",
+    "args": {
+      "commands": [
+        "workbench.action.files.save",
+        {
+          "command": "workbench.action.terminal.sendSequence",
+          "args": {
+            "text": "\"$HOME/git_station/necode/necode.sh\" \"${file}\"\r"
+          }
+        },
+        {
+          "command": "workbench.action.terminal.focus"
+        }
+      ]
+    },
+    "when": "(editorTextFocus && editorLangId == cpp) || terminalFocus"
+  },
+  {
+    "key": "ctrl+l",
+    "command": "runCommands",
+    "args": {
+      "commands": [
+        "workbench.action.files.save",
+        {
+          "command": "workbench.action.terminal.sendSequence",
+          "args": {
+            "text": "\"$HOME/git_station/necode/necode.sh\" \"${file}\" --paste\r"
+          }
+        },
+        {
+          "command": "workbench.action.terminal.focus"
+        }
+      ]
+    },
+    "when": "(editorTextFocus && editorLangId == cpp) || terminalFocus"
+  }
+]

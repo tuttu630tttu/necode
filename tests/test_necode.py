@@ -1,0 +1,189 @@
+"""Integration checks; run with python3 -m unittest discover -s tests."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'necode.sh'
+
+
+class RunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='necode-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / 'project with spaces'
+        self.root.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        self.source = self.root / 'nested folder' / 'test.cpp'
+        self.source.parent.mkdir()
+        self.env = dict(os.environ, TMPDIR=self.temp.name)
+
+    def run_source(self, code, args=(), data=''):
+        self.source.write_text(code)
+        result = subprocess.run(
+            [str(SCRIPT), str(self.source), *args], cwd=self.temp.name,
+            input=data, text=True, capture_output=True, env=self.env, timeout=30,
+        )
+        self.assertEqual(list(Path(self.temp.name).glob('necode.*')), [])
+        return result
+
+    def test_success_does_not_retry(self):
+        result = self.run_source('''#include <iostream>
+int main(){int n;std::cin>>n;std::cout<<n+1<<"\\n";
+std::cerr<<"diagnostic\\n";}''', data='41\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '42\n')
+        self.assertEqual(result.stderr, '[stderr] diagnostic\n')
+        self.assertTrue((self.root / 'out/nested folder/test').is_file())
+
+    def test_failure_replays_complete_input_and_preserves_failure(self):
+        self.set_clipboard('20 22\n')
+        result = self.run_source('''#include <iostream>
+int main(){int a;std::cin>>a;
+#ifdef _GLIBCXX_DEBUG
+std::cout<<"checked "<<a<<"\\n";return 7;
+#else
+int b;std::cin>>b;std::cout<<"fallback "<<a+b<<"\\n";
+#endif
+}''', args=['--paste'])
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(result.stdout, 'checked 20\nfallback 42\n')
+        self.assertIn('検査なしの終了コード: 0', result.stderr)
+
+    def set_clipboard(self, data):
+        clipboard = Path(self.temp.name) / 'pbpaste'
+        count = Path(self.temp.name) / 'clipboard-count'
+        content = Path(self.temp.name) / 'clipboard-content'
+        content.write_bytes(data.encode())
+        clipboard.write_text('#!/bin/bash\nprintf x >> "$CLIPBOARD_COUNT"\n'
+                             'cat "$CLIPBOARD_CONTENT"\n')
+        clipboard.chmod(0o755)
+        self.env.update(PATH=self.temp.name + os.pathsep + os.environ['PATH'],
+                        CLIPBOARD_COUNT=str(count), CLIPBOARD_CONTENT=str(content))
+        return count
+
+    def test_container_error_retries_clipboard_once(self):
+        count = self.set_clipboard('\033[200~42\033[201~\n')
+        result = self.run_source('''#include <vector>
+#include <iostream>
+int main(){int n;std::cin>>n;std::vector<int> v(2,n);v.pop_back();
+std::cout<<v[1]<<"\\n";}''', args=['--paste'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('検査なしの実行結果', result.stderr)
+        self.assertIn('検査なしの終了コード:', result.stderr)
+        self.assertEqual(count.read_text(), 'x')
+
+    def test_compile_failure_does_not_retry(self):
+        result = self.run_source('invalid C++')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Compile Error', result.stderr)
+        self.assertNotIn('検査なし', result.stderr)
+
+    def test_warning_does_not_retry(self):
+        result = self.run_source('int main(){int unused;}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('warning:', result.stderr)
+        self.assertNotIn('検査なし', result.stderr)
+
+    def test_interrupt_does_not_retry(self):
+        self.set_clipboard('')
+        result = self.run_source('#include <csignal>\nint main(){raise(SIGINT);}', args=['--paste'])
+        self.assertEqual(result.returncode, 130, result.stderr)
+        self.assertNotIn('検査なし', result.stderr)
+
+    def test_failed_fallback_reports_both_exit_codes(self):
+        self.set_clipboard('')
+        result = self.run_source('''int main(){
+#ifdef _GLIBCXX_DEBUG
+return 7;
+#else
+return 9;
+#endif
+}''', args=['--paste'])
+        self.assertEqual(result.returncode, 7)
+        self.assertIn('検査なしの終了コード: 9', result.stderr)
+
+    def test_manual_failure_does_not_retry(self):
+        result = self.run_source('int main(){return 7;}')
+        self.assertEqual(result.returncode, 7)
+        self.assertNotIn('検査なし', result.stderr)
+
+    def test_manual_mode_runs_before_stdin_closes(self):
+        self.source.write_text('#include <iostream>\nint main(){std::cout<<"ready\\n"<<std::flush;}')
+        process = subprocess.Popen([str(SCRIPT), str(self.source)],
+                                   cwd=self.temp.name, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=self.env)
+        try:
+            # stdin remains open throughout: a buffering implementation hangs here.
+            self.assertEqual(process.wait(timeout=15), 0)
+            self.assertEqual(process.stdout.read(), 'ready\n')
+            self.assertEqual(process.stderr.read(), '')
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdin.close()
+            process.stdout.close()
+            process.stderr.close()
+
+    def test_multiline_stderr_and_missing_final_newline(self):
+        result = self.run_source('#include <iostream>\nint main(){std::cout<<"answer";'
+                                 'std::cerr<<"one\\ntwo";return 3;}')
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, 'answer')
+        self.assertEqual(result.stderr, '[stderr] one\n[stderr] two\n')
+        self.assertNotIn('\033', result.stderr)
+
+    def test_fallback_stderr_is_also_formatted(self):
+        self.set_clipboard('')
+        result = self.run_source('#include <iostream>\nint main(){std::cerr<<"trace\\n";'
+                                 '\n#ifdef _GLIBCXX_DEBUG\nreturn 7;\n#endif\n}',
+                                 args=['--paste'])
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stderr.count('[stderr] trace'), 2)
+
+    def test_terminal_color_and_separator_after_stdout_without_newline(self):
+        import pty
+        import select
+        self.source.write_text('#include <iostream>\nint main(){std::cout<<"answer";'
+                               'std::cerr<<"trace\\n";}')
+        master, slave = pty.openpty()
+        try:
+            env = dict(self.env, TERM='xterm-256color')
+            env.pop('NO_COLOR', None)
+            process = subprocess.Popen([str(SCRIPT), str(self.source)],
+                                       cwd=self.temp.name, stdin=subprocess.DEVNULL,
+                                       stdout=slave, stderr=slave, env=env)
+            try:
+                self.assertEqual(process.wait(timeout=15), 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+            chunks = []
+            while select.select([master], [], [], 0.2)[0]:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            output = b''.join(chunks).decode()
+            self.assertIn('answer\r\n\033[33m[stderr]\033[0m trace\r\n', output)
+        finally:
+            os.close(master)
+            if slave is not None:
+                os.close(slave)
+
+    def test_keybindings_keep_only_two_modes(self):
+        bindings = json.loads((SCRIPT.parent / 'examples/keybindings.json').read_text())
+        self.assertEqual([b['key'] for b in bindings], ['ctrl+;', 'ctrl+l'])
+        self.assertNotIn('--no-debug', json.dumps(bindings))
+
+
+if __name__ == '__main__':
+    unittest.main()

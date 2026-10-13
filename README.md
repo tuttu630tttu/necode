@@ -1,0 +1,125 @@
+# necode.sh
+
+C++ をコンパイルして実行する Bash スクリプトです。スクリプトの置き場所、ユーザー名、`cpp_code` というフォルダ名には依存しません。macOS / Linux の Bash で動作し、`--paste` は macOS の `pbpaste` を使います。
+
+## インストール
+
+Git と C++23 対応コンパイラを用意して、好きな場所に clone してください。
+
+```sh
+mkdir -p "$HOME/git_station"
+git clone https://github.com/tuttu630tttu/necode.git "$HOME/git_station/necode"
+"$HOME/git_station/necode/necode.sh" --help
+```
+
+clone 先の名前や場所は自由です。実行権限は Git に記録されています。コンパイラと AtCoder Library 自体は別途インストールしてください。
+
+## 使い方
+
+```sh
+./necode.sh test.cpp
+./necode.sh test.cpp --paste
+./necode.sh --help
+```
+
+ファイルには絶対パス・相対パスの両方を指定できます。空白があるパスは引用符で囲んでください。オプションはファイル名の前後どちらでも指定できます。
+
+通常は `-std=c++23 -O2 -Wall -Wextra -Wshadow -D_GLIBCXX_DEBUG` でコンパイル・実行します。`--paste` の実行が非ゼロの終了コードで失敗した場合、`-Wall -Wextra -Wshadow -D_GLIBCXX_DEBUG` を外して再コンパイルし、**同じ入力**で実行した結果も表示します。`-std=c++23 -O2` と ACL の include 指定は保ちます。`--no-debug` や追加の keybind は不要です。
+
+警告だけの場合やコンパイルエラーの場合は再実行しません。Ctrl+C による中断でも再実行しません。検査なしで成功してもスクリプトは最初の失敗の終了コードを返します。
+
+`_GLIBCXX_DEBUG` は GNU の標準ライブラリの検査機能です。検査を外して不正アクセスが止まらなくなっても、その動作は未定義で、正しい結果の保証はありません。`std::cerr` の自分の出力は、どちらの実行でも表示されます。
+
+**手入力（Ctrl+;）では標準入力を直接プログラムに渡します。** 入力なしのプログラムはそのまま実行でき、入力を決まった個数だけ読むプログラムなら Ctrl+D は不要です。プログラム自体が EOF まで読む場合は、従来どおり EOF を送ってください。手入力モードでは失敗しても自動再実行しません。
+
+**ペースト（Ctrl+L / `--paste`）だけが自動再実行の対象です。** クリップボードは一度だけ取得し、再利用のため一時ファイルへ保存します。一時ファイルと検査なしの実行ファイルは終了時に削除します。
+
+コンパイラは `g++-16` → `g++-15` → `g++-14` → `g++` → `clang++` の順に探します。C++23 に対応したコンパイラが必要です。指定する場合は `CXX` に実行ファイル名またはパスを設定してください（追加フラグは含めません）。
+
+```sh
+CXX=clang++ ./necode.sh test.cpp
+```
+
+## デバッグ出力の表示
+
+プログラムの `std::cerr`（標準エラー出力）は、各行の先頭に `[stderr]` を付けて表示します。ターミナルでは目印を黄色にします。`cpp` 側の変更や追加の keybind は不要で、手入力・ペースト・検査なしの再実行のいずれにも対応します。
+
+```text
+2 2
+[stderr] 1 1
+[stderr] 2 1
+```
+
+`std::cout` の内容や標準出力へのリダイレクトは変更しません。ターミナルでは stderr の最初に改行を入れ、直前の答えに改行がなくても目印がくっつかないようにします。ただし両ストリームの出力が頻繁に交互になる場合、表示順序や行の交錯まで厳密に保証するものではありません。stderr の書式化は行単位なので、改行のない途中の出力は行が完成するかプログラムが終了したときに表示されます。
+
+コンパイラの警告・エラーは元の表示を保ちます。実行時の例外や標準ライブラリのエラーも stderr として目印が付きます。色が不要なら `NO_COLOR=1` を指定できます。ファイルへリダイレクトする場合は色を付けません。
+
+## 出力先と ACL
+
+ソースのある Git リポジトリのルートを作業ルートとして自動検出します。Git 管理外ならソースのあるディレクトリを使います。呼び出したターミナルの現在地やスクリプトの置き場所には依存しません。
+
+```text
+作業ルート/
+├── ac-library/
+├── test.cpp                 → out/main/test
+├── shojin/a.cpp             → out/shojin/a
+└── out/
+```
+
+作業ルートの `ac-library/` があれば自動で include パスに追加します。別の場所に置く場合や Git 管理外の作業フォルダをまとめる場合は、環境変数で設定できます。
+
+```sh
+export NECODE_ROOT="$HOME/cpp_code"
+export NECODE_ACL_DIR="$HOME/libraries/ac-library"
+# 任意: 出力先を変更
+export NECODE_OUT_DIR="$HOME/cpp-binaries"
+```
+
+`NECODE_ROOT` を指定する場合、ソースはその中に置いてください。`NECODE_OUT_DIR` と `NECODE_ACL_DIR` に相対パスを指定すると、呼び出した現在地からのパスになります。複数の作業ルートで同じ出力先を共有すると同名の相対パスが上書きされるため、出力先は作業ルートごとに分けてください。
+
+プログラムの実行時の現在地は呼び出したターミナルの現在地を引き継ぎます。
+
+## どこからでも呼び出す（PATH）
+
+clone 先のリポジトリで、最初に実行権限を確認します。
+
+```sh
+chmod +x necode.sh
+```
+
+PATH は、`necode.sh` のように名前だけで呼んだコマンドを探すフォルダの一覧です。スクリプトは移動もコピーもされません。`/Users/.../shojin/necode.sh` のようにパスを指定した場合は PATH を使わず、その場所を直接探します。
+
+そのディレクトリの絶対パスを PATH に追加すれば使えます。例えば `~/.zshrc` に次を追加します（clone 先に合わせて変更してください）。
+
+```sh
+export PATH="$HOME/git_station/necode:$PATH"
+```
+
+新しいターミナルを開くか `source ~/.zshrc` を実行した後は、どのディレクトリでも次のように呼び出せます。
+
+```sh
+necode.sh /path/to/source.cpp --paste
+```
+
+ユーザー名をスクリプトに書く必要はありません。`$HOME` はシェルが設定します。リポジトリ名を `necode` などに変更したり、`necode.sh` だけ別リポジトリに移したりしても動作します。コンパイラや ACL 自体は別途用意してください。
+
+## VS Code の keybind
+
+`~/git_station/necode` に置いて PATH を設定せずに使う場合、`keybindings.json` の実行部分を次に変更します。`$HOME` はターミナルのシェルがホームディレクトリに展開するので、ユーザー名も固定しません。
+
+```json
+"text": "\"$HOME/git_station/necode/necode.sh\" \"${file}\" --paste\u000d"
+```
+
+Ctrl+L は `--paste` あり、Ctrl+; は `--paste` なしのままで、失敗時の自動再実行は Ctrl+L のみです。`${workspaceFolder}` を使わないので、別のフォルダや単独の C++ ファイルでも同じコマンドを使えます。スクリプトを移動した場合は、このパスを変更してください。PATH を設定した場合は `\"$HOME/git_station/necode/necode.sh\"` を `necode.sh` に置き換えることもできます。PATH の設定後は VS Code のターミナルも開き直してください。
+
+既存のショートカットを保った設定例を [examples/keybindings.json](examples/keybindings.json) に置いています。ユーザー設定には必要な項目だけ統合してください。`sendSequence` の変数展開については [VS Code 公式ドキュメント](https://code.visualstudio.com/docs/terminal/advanced) を参照してください。
+
+
+## 動作確認
+
+```sh
+python3 -m unittest discover -s tests
+```
+
+C++ コンパイラと Git を使い、成功時・失敗時の再実行、入力の再利用、クリップボードの取得回数、中断、コンパイルエラーと警告を確認します。コンテナ検査のテストには GNU の libstdc++ が必要です。
