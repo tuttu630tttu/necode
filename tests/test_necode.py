@@ -1,6 +1,7 @@
 """Integration checks; run with python3 -m unittest discover -s tests."""
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -35,7 +36,7 @@ int main(){int n;std::cin>>n;std::cout<<n+1<<"\\n";
 std::cerr<<"diagnostic\\n";}''', data='41\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, '42\n')
-        self.assertEqual(result.stderr, '[stderr] diagnostic\n')
+        self.assertRegex(result.stderr, r'^\[stderr\] diagnostic\n\n\[time\] real [0-9.]+ s \| user [0-9.]+ s \| sys [0-9.]+ s\n$')
         self.assertTrue((self.root / 'out/nested folder/test').is_file())
 
     def test_failure_replays_complete_input_and_preserves_failure(self):
@@ -64,6 +65,36 @@ int b;std::cin>>b;std::cout<<"fallback "<<a+b<<"\\n";
                         CLIPBOARD_COUNT=str(count), CLIPBOARD_CONTENT=str(content))
         return count
 
+    def test_clipboard_change_during_compile_does_not_change_either_run(self):
+        import shutil
+        count = self.set_clipboard('42\n')
+        compiler = next((shutil.which(name) for name in
+                         ['g++-16', 'g++-15', 'g++-14', 'g++', 'clang++']
+                         if shutil.which(name)), None)
+        self.assertIsNotNone(compiler)
+        wrapper = Path(self.temp.name) / 'compiler'
+        # Simulate copying another input as soon as compilation starts.
+        wrapper.write_text('#!/bin/bash\nprintf "99\\n" > "$CLIPBOARD_CONTENT"\n'
+                           'exec "$REAL_CXX" "$@"\n')
+        wrapper.chmod(0o755)
+        self.env.update(CXX=str(wrapper), REAL_CXX=compiler)
+        result = self.run_source('#include <iostream>\nint main(){int n;std::cin>>n;'
+                                 'std::cout<<n<<"\\n";'
+                                 '\n#ifdef _GLIBCXX_DEBUG\nreturn 7;\n#endif\n}',
+                                 args=['--paste'])
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(result.stdout, '42\n42\n')
+        self.assertEqual(count.read_text(), 'x')
+        self.assertEqual(Path(self.env['CLIPBOARD_CONTENT']).read_text(), '99\n')
+
+    def test_paste_compile_failure_cleans_up_snapshot(self):
+        count = self.set_clipboard('42\n')
+        result = self.run_source('invalid C++', args=['--paste'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Compile Error', result.stderr)
+        self.assertNotIn('[time]', result.stderr)
+        self.assertEqual(count.read_text(), 'x')
+
     def test_container_error_retries_clipboard_once(self):
         count = self.set_clipboard('\033[200~42\033[201~\n')
         result = self.run_source('''#include <vector>
@@ -79,6 +110,7 @@ std::cout<<v[1]<<"\\n";}''', args=['--paste'])
         result = self.run_source('invalid C++')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Compile Error', result.stderr)
+        self.assertNotIn('[time]', result.stderr)
         self.assertNotIn('検査なし', result.stderr)
 
     def test_warning_does_not_retry(self):
@@ -120,7 +152,7 @@ return 9;
             # stdin remains open throughout: a buffering implementation hangs here.
             self.assertEqual(process.wait(timeout=15), 0)
             self.assertEqual(process.stdout.read(), 'ready\n')
-            self.assertEqual(process.stderr.read(), '')
+            self.assertRegex(process.stderr.read(), r'^\n\[time\] real [0-9.]+ s \| user [0-9.]+ s \| sys [0-9.]+ s\n$')
         finally:
             if process.poll() is None:
                 process.kill()
@@ -134,7 +166,7 @@ return 9;
                                  'std::cerr<<"one\\ntwo";return 3;}')
         self.assertEqual(result.returncode, 3)
         self.assertEqual(result.stdout, 'answer')
-        self.assertEqual(result.stderr, '[stderr] one\n[stderr] two\n')
+        self.assertTrue(result.stderr.startswith('[stderr] one\n[stderr] two\n\n[time] '), result.stderr)
         self.assertNotIn('\033', result.stderr)
 
     def test_fallback_stderr_is_also_formatted(self):
@@ -144,6 +176,7 @@ return 9;
                                  args=['--paste'])
         self.assertEqual(result.returncode, 7)
         self.assertEqual(result.stderr.count('[stderr] trace'), 2)
+        self.assertEqual(result.stderr.count('[time] real '), 2)
 
     def test_terminal_color_and_separator_after_stdout_without_newline(self):
         import pty
@@ -178,6 +211,26 @@ return 9;
             os.close(master)
             if slave is not None:
                 os.close(slave)
+
+    def test_execution_time_excludes_compilation_and_keeps_stdout_clean(self):
+        import shutil
+        compiler = next(shutil.which(name) for name in
+                        ['g++-16', 'g++-15', 'g++-14', 'g++', 'clang++']
+                        if shutil.which(name))
+        wrapper = Path(self.temp.name) / 'slow-compiler'
+        wrapper.write_text('#!/bin/bash\nsleep 1\nexec "$REAL_CXX" "$@"\n')
+        wrapper.chmod(0o755)
+        self.env.update(CXX=str(wrapper), REAL_CXX=compiler, TIMEFORMAT='ignore me')
+        result = self.run_source('#include <thread>\n#include <chrono>\n#include <iostream>\n'
+                                 'int main(){std::this_thread::sleep_for(std::chrono::milliseconds(150));'
+                                 'std::cout<<"done";}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'done')
+        match = re.search(r'\[time\] real ([0-9.]+) s \| user ([0-9.]+) s \| sys ([0-9.]+) s', result.stderr)
+        self.assertIsNotNone(match, result.stderr)
+        self.assertGreaterEqual(float(match[1]), 0.12)
+        self.assertLess(float(match[1]), 1.0)
+        self.assertNotIn('[stderr] [time]', result.stderr)
 
     def test_keybindings_keep_only_two_modes(self):
         bindings = json.loads((SCRIPT.parent / 'examples/keybindings.json').read_text())

@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: necode.sh [--paste] FILE
 
-  --paste       Read clipboard input; retry runtime failures without debug flags.
+  --paste       Snapshot clipboard before compiling; retry runtime failures without debug flags.
   -h, --help    Show this help.
 
 Environment:
@@ -31,6 +31,19 @@ while (($#)); do
 done
 [[ -n "$source_file" ]] || { usage >&2; exit 1; }
 [[ -f "$source_file" ]] || fail "Source file not found: $source_file"
+# Freeze clipboard input before path discovery and compilation can take time.
+if "$paste"; then
+  command -v pbpaste >/dev/null 2>&1 || fail '--paste requires pbpaste (macOS).'
+fi
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/necode.XXXXXXXX")
+trap 'rm -rf -- "$run_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+input="$run_dir/input"
+if "$paste"; then
+  pbpaste | sed $'s/\033\\[200~//g; s/\033\\[201~//g' > "$input"
+fi
+
 source_dir=$(cd -- "$(dirname -- "$source_file")" && pwd -P)
 source_file="$source_dir/$(basename -- "$source_file")"
 
@@ -61,9 +74,6 @@ if [[ -z "$compiler" ]]; then
 fi
 [[ -n "$compiler" ]] || fail 'No C++ compiler found. Install one or set CXX.'
 command -v "$compiler" >/dev/null 2>&1 || fail "Compiler not found: $compiler"
-if "$paste"; then
-  command -v pbpaste >/dev/null 2>&1 || fail '--paste requires pbpaste (macOS).'
-fi
 
 flags=(-std=c++23 -O2)
 debug_flags=(-Wall -Wextra -Wshadow -D_GLIBCXX_DEBUG)
@@ -79,10 +89,6 @@ if ! "$compiler" "${flags[@]}" "${debug_flags[@]}" "$source_file" -o "$output"; 
 fi
 
 # Route only runtime stderr through a line formatter. Stdout remains untouched.
-run_dir=$(mktemp -d "${TMPDIR:-/tmp}/necode.XXXXXXXX")
-trap 'rm -rf -- "$run_dir"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 stderr_pipe="$run_dir/stderr"
 mkfifo "$stderr_pipe"
 terminal=0
@@ -95,6 +101,7 @@ if [[ -t 2 ]]; then
 fi
 run_program() {
   local result=0 reader
+  local TIMEFORMAT=$'\n[time] real %3R s | user %3U s | sys %3S s'
   awk -v terminal="$terminal" -v color="$color" '
     NR == 1 && terminal { printf "\n" }
     {
@@ -104,9 +111,11 @@ run_program() {
     }
   ' < "$stderr_pipe" >&2 &
   reader=$!
-  "$@" 2> "$stderr_pipe" || result=$?
+  # Time only the C++ process, excluding compilation and the stderr formatter.
+  { time "$@" 2> "$stderr_pipe"; } 2> "$run_dir/timing" || result=$?
   # Drain the formatter before printing a retry header or exiting.
   wait "$reader" || :
+  cat -- "$run_dir/timing" >&2
   return "$result"
 }
 
@@ -118,8 +127,6 @@ if ! "$paste"; then
 fi
 
 # Only clipboard mode can replay the full input automatically.
-input="$run_dir/input"
-pbpaste | sed $'s/\033\\[200~//g; s/\033\\[201~//g' > "$input"
 if [[ -t 1 ]]; then
   cat -- "$input"
 fi
