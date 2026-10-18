@@ -36,7 +36,7 @@ int main(){int n;std::cin>>n;std::cout<<n+1<<"\\n";
 std::cerr<<"diagnostic\\n";}''', data='41\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, '42\n')
-        self.assertRegex(result.stderr, r'^\[stderr\] diagnostic\n\n\[time\] real [0-9.]+ s \| user [0-9.]+ s \| sys [0-9.]+ s\n$')
+        self.assertRegex(result.stderr, r'^\[stderr\]  diagnostic\n\n\[time\] real [0-9.]+ s \| user [0-9.]+ s \| sys [0-9.]+ s\n$')
         self.assertTrue((self.root / 'out/nested folder/test').is_file())
 
     def test_failure_replays_complete_input_and_preserves_failure(self):
@@ -166,7 +166,7 @@ return 9;
                                  'std::cerr<<"one\\ntwo";return 3;}')
         self.assertEqual(result.returncode, 3)
         self.assertEqual(result.stdout, 'answer')
-        self.assertTrue(result.stderr.startswith('[stderr] one\n[stderr] two\n\n[time] '), result.stderr)
+        self.assertTrue(result.stderr.startswith('[stderr]  one\n[stderr]  two\n\n[time] '), result.stderr)
         self.assertNotIn('\033', result.stderr)
 
     def test_fallback_stderr_is_also_formatted(self):
@@ -175,21 +175,18 @@ return 9;
                                  '\n#ifdef _GLIBCXX_DEBUG\nreturn 7;\n#endif\n}',
                                  args=['--paste'])
         self.assertEqual(result.returncode, 7)
-        self.assertEqual(result.stderr.count('[stderr] trace'), 2)
+        self.assertEqual(result.stderr.count('[stderr]  trace'), 2)
         self.assertEqual(result.stderr.count('[time] real '), 2)
 
-    def test_terminal_color_and_separator_after_stdout_without_newline(self):
+    def run_in_terminal(self, code):
         import pty
         import select
-        self.source.write_text('#include <iostream>\nint main(){std::cout<<"answer";'
-                               'std::cerr<<"trace\\n";}')
+        self.source.write_text(code)
         master, slave = pty.openpty()
         try:
-            env = dict(self.env, TERM='xterm-256color')
-            env.pop('NO_COLOR', None)
             process = subprocess.Popen([str(SCRIPT), str(self.source)],
                                        cwd=self.temp.name, stdin=subprocess.DEVNULL,
-                                       stdout=slave, stderr=slave, env=env)
+                                       stdout=slave, stderr=slave, env=self.env)
             try:
                 self.assertEqual(process.wait(timeout=15), 0)
             finally:
@@ -198,19 +195,62 @@ return 9;
                     process.wait()
             chunks = []
             while select.select([master], [], [], 0.2)[0]:
-                try:
-                    chunk = os.read(master, 4096)
-                except OSError:
-                    break
+                chunk = os.read(master, 4096)
                 if not chunk:
                     break
                 chunks.append(chunk)
-            output = b''.join(chunks).decode()
-            self.assertIn('answer\r\n\033[33m[stderr]\033[0m trace\r\n', output)
+            return b''.join(chunks).decode()
         finally:
             os.close(master)
-            if slave is not None:
-                os.close(slave)
+            os.close(slave)
+
+    def test_terminal_color_and_separator_after_stdout_without_newline(self):
+        self.env['TERM'] = 'xterm-256color'
+        self.env.pop('NO_COLOR', None)
+        output = self.run_in_terminal('#include <iostream>\nint main(){std::cout<<"answer";'
+                                      'std::cerr<<"trace\\n";}')
+        self.assertIn('answer\r\n\033[33m[stderr]\033[0m  trace\r\n', output)
+
+    def test_log_tags_and_color_names_in_terminal(self):
+        self.env['TERM'] = 'xterm-256color'
+        self.env.pop('NO_COLOR', None)
+        shades = {'trace': 90, 'debug': 35, 'info': 36, 'warn': 33,
+                  'error': 31, 'success': 32, 'red': 31, 'green': 32,
+                  'yellow': 33, 'blue': 34, 'magenta': 35, 'cyan': 36,
+                  'white': 37, 'gray': 90, 'ERROR': 31}
+        lines = ''.join(f'[{tag}] value\n' for tag in shades)
+        code = '#include <iostream>\nint main(){std::cerr<<' + json.dumps(lines) + ';}'
+        output = self.run_in_terminal(code)
+        for tag, shade in shades.items():
+            self.assertIn(f'\033[{shade}m[{tag}]\033[0m{" " * (8 - len(tag))}value\r\n', output)
+        self.assertNotIn('[stderr]', output)
+
+    def test_tags_remain_readable_without_terminal_colors(self):
+        result = self.run_source('#include <iostream>\nint main(){std::cout<<"answer";'
+                                 'std::cerr<<"[info] hello\\n[red] world\\n'
+                                 '[custom] untouched\\nvalue [error] middle\\n";}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'answer')
+        self.assertTrue(result.stderr.startswith('[info]    hello\n[red]     world\n'
+                        '[stderr]  [custom] untouched\n[stderr]  value [error] middle\n'), result.stderr)
+        self.assertNotIn('\033', result.stderr)
+
+    def test_no_color_and_dumb_terminal_preserve_tags(self):
+        for settings in ({'TERM': 'xterm', 'NO_COLOR': '1'}, {'TERM': 'dumb'}):
+            with self.subTest(settings=settings):
+                self.env.pop('NO_COLOR', None)
+                self.env.update(settings)
+                output = self.run_in_terminal('#include <iostream>\nint main(){std::cerr<<"[warn] look\\n";}')
+                self.assertIn('[warn]    look\r\n', output)
+                self.assertNotIn('\033', output)
+
+    def test_retry_keeps_tagged_logs(self):
+        self.set_clipboard('')
+        result = self.run_source('#include <iostream>\nint main(){std::cerr<<"[debug] value\\n";'
+                                 '\n#ifdef _GLIBCXX_DEBUG\nreturn 7;\n#endif\n}', args=['--paste'])
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stderr.count('[debug]   value'), 2)
+        self.assertNotIn('[stderr] [debug]', result.stderr)
 
     def test_execution_time_excludes_compilation_and_keeps_stdout_clean(self):
         import shutil
@@ -231,6 +271,15 @@ return 9;
         self.assertGreaterEqual(float(match[1]), 0.12)
         self.assertLess(float(match[1]), 1.0)
         self.assertNotIn('[stderr] [time]', result.stderr)
+
+    def test_tag_columns_align_and_preserve_message_spacing(self):
+        result = self.run_source('#include <iostream>\nint main(){std::cerr<<'
+                                 '"[debug]  1\\n[red]  22\\n[success]  333\\nplain\\n";}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stderr.splitlines()[:4]
+        self.assertEqual(lines, ['[debug]    1', '[red]      22',
+                                 '[success]  333', '[stderr]  plain'])
+        self.assertEqual([line.index('  ') for line in lines[:3]], [7, 5, 9])
 
     def test_keybindings_keep_only_two_modes(self):
         bindings = json.loads((SCRIPT.parent / 'examples/keybindings.json').read_text())

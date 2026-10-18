@@ -103,10 +103,34 @@ run_program() {
   local result=0 reader
   local TIMEFORMAT=$'\n[time] real %3R s | user %3U s | sys %3S s'
   awk -v terminal="$terminal" -v color="$color" '
+    BEGIN {
+      palette["trace"] = palette["gray"] = 90
+      palette["debug"] = palette["magenta"] = 35
+      palette["info"] = palette["cyan"] = 36
+      palette["warn"] = palette["yellow"] = 33
+      palette["error"] = palette["red"] = 31
+      palette["success"] = palette["green"] = 32
+      palette["blue"] = 34
+      palette["white"] = 37
+    }
     NR == 1 && terminal { printf "\n" }
     {
-      if (color) printf "\033[33m[stderr]\033[0m %s\n", $0
-      else printf "[stderr] %s\n", $0
+      label = "[stderr]"
+      message = $0
+      shade = 33
+      # Recognize only known tags at the start; leave all other text intact.
+      if (match($0, /^\[[[:alpha:]]+\]/)) {
+        tag = substr($0, 1, RLENGTH)
+        key = tolower(substr(tag, 2, length(tag) - 2))
+        if (key in palette) {
+          label = tag
+          message = substr($0, RLENGTH + 1)
+          sub(/^[ \t]/, "", message)
+          shade = palette[key]
+        }
+      }
+      if (color) printf "\033[%dm%s\033[0m%*s %s\n", shade, label, 9 - length(label), "", message
+      else printf "%-9s %s\n", label, message
       fflush()
     }
   ' < "$stderr_pipe" >&2 &
