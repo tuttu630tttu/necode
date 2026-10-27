@@ -178,13 +178,13 @@ return 9;
         self.assertEqual(result.stderr.count('[stderr]  trace'), 2)
         self.assertEqual(result.stderr.count('[time] real '), 2)
 
-    def run_in_terminal(self, code):
+    def run_in_terminal(self, code, args=()):
         import pty
         import select
         self.source.write_text(code)
         master, slave = pty.openpty()
         try:
-            process = subprocess.Popen([str(SCRIPT), str(self.source)],
+            process = subprocess.Popen([str(SCRIPT), str(self.source), *args],
                                        cwd=self.temp.name, stdin=subprocess.DEVNULL,
                                        stdout=slave, stderr=slave, env=self.env)
             try:
@@ -280,6 +280,20 @@ return 9;
         self.assertEqual(lines, ['[debug]    1', '[red]      22',
                                  '[success]  333', '[stderr]  plain'])
         self.assertEqual([line.index('  ') for line in lines[:3]], [7, 5, 9])
+
+    def test_clipboard_input_and_output_have_separate_terminal_sections(self):
+        self.env['NO_COLOR'] = '1'
+        for data in ('42', '42\n'):
+            with self.subTest(data=data):
+                self.set_clipboard(data)
+                output = self.run_in_terminal('#include <iostream>\nint main(){int n;'
+                                              'std::cin>>n;std::cout<<n+1<<"\\n";}',
+                                              args=['--paste'])
+                expected_input = data.replace('\n', '\r\n')
+                self.assertIn('\r\n--- INPUT ---\r\n' + expected_input
+                              + '\r\n--- OUTPUT ---\r\n43\r\n', output)
+                self.assertEqual(output.count('--- INPUT ---'), 1)
+                self.assertEqual(output.count('--- OUTPUT ---'), 1)
 
     def test_keybindings_keep_only_two_modes(self):
         bindings = json.loads((SCRIPT.parent / 'examples/keybindings.json').read_text())

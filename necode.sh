@@ -152,7 +152,10 @@ fi
 
 # Only clipboard mode can replay the full input automatically.
 if [[ -t 1 ]]; then
+  printf '\n--- INPUT ---\n'
   cat -- "$input"
+  # Always start output on a new line, even when the input has no final newline.
+  printf '\n--- OUTPUT ---\n'
 fi
 
 status=0
